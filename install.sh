@@ -28,11 +28,152 @@ Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 Native Linux Docker Engine: setup, updater and discovery runtimes run in containers.
 Requires an existing local rootful Docker Engine, Compose v2 and Portainer.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
+Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
 Windows/Docker Desktop requires setup.ps1 and host discovery instead.
 Existing installation files, configuration, volumes and secrets are preserved.
 EOF
 }
 fail() { printf '%s\n' "$*" >&2; exit 1; }
+emit_cgroup_service() {
+  cat <<'ALARM_CGROUP_SERVICE'
+#!/sbin/openrc-run
+# alarm-management-owned: cgroup-delegation-v1
+description="Enable Docker resource delegation in Alpine LXC"
+depend() { need cgroups; before docker; }
+
+cgroup_move_process() { printf '%s\n' "$2" > "$1/host-processes/cgroup.procs"; }
+cgroup_enable() { printf '+cpu +memory +pids\n' > "$1/cgroup.subtree_control"; }
+repair_cgroups() {
+  cg=$1
+  proc=$2
+  [ -r "$cg/cgroup.controllers" ] || return 1
+  for controller in cpu memory pids; do
+    grep -qw "$controller" "$cg/cgroup.controllers" || return 1
+  done
+  # Avoid moving any processes when delegation already works.
+  missing=false
+  for controller in cpu memory pids; do
+    grep -qw "$controller" "$cg/cgroup.subtree_control" || missing=true
+  done
+  if [ "$missing" = true ]; then
+    [ ! -L "$cg/host-processes" ] || return 1
+    mkdir -p "$cg/host-processes" || return 1
+    # Snapshots and bounded retries handle processes exiting/spawning during repair.
+    attempt=0
+    while [ "$attempt" -lt 3 ]; do
+      pids=$(cat "$cg/cgroup.procs") || return 1
+      [ -n "$pids" ] || break
+      for pid in $pids; do
+        case "$pid" in *[!0-9]*|'') return 1;; esac
+        if [ -d "$proc/$pid" ]; then
+          cgroup_move_process "$cg" "$pid" || {
+            [ ! -d "$proc/$pid" ] || return 1
+          }
+        fi
+      done
+      attempt=$((attempt + 1))
+    done
+    cgroup_enable "$cg" || return 1
+  fi
+  # cgroupfs uses /docker; existing container processes stay in their own groups.
+  if [ -d "$cg/docker" ]; then
+    cgroup_enable "$cg/docker" || return 1
+  fi
+}
+start() {
+  ebegin "Enabling Docker CPU, memory and PID controllers"
+  repair_cgroups /sys/fs/cgroup /proc
+  result=$?
+  eend "$result"
+  return "$result"
+}
+stop() { return 0; } # Never withdraw controllers from running containers.
+if [ "${1:-}" = --repair ]; then
+  repair_cgroups /sys/fs/cgroup /proc
+  exit $?
+fi
+ALARM_CGROUP_SERVICE
+}
+resource_probe() {
+  docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true --memory 64m --cpus 0.1 --pids-limit 32 \
+    --entrypoint /bin/sh "$TOOLS_IMAGE" -ec '
+      if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+        test "$(cat /sys/fs/cgroup/memory.max)" = 67108864
+        test "$(cat /sys/fs/cgroup/pids.max)" = 32
+        read quota period < /sys/fs/cgroup/cpu.max
+      else
+        test "$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)" = 67108864
+        test "$(cat /sys/fs/cgroup/pids/pids.max)" = 32
+        cpu=/sys/fs/cgroup/cpu
+        [ -d "$cpu" ] || cpu=/sys/fs/cgroup/cpu,cpuacct
+        quota=$(cat "$cpu/cpu.cfs_quota_us")
+        period=$(cat "$cpu/cpu.cfs_period_us")
+      fi
+      test "$quota" -gt 0
+      test "$((quota * 10))" = "$period"
+    '
+}
+resource_preflight() {
+  printf '\nChecking Docker CPU, memory and PID limits before setup.\n'
+  probe_log=$(mktemp)
+  if resource_probe >"$probe_log" 2>&1; then
+    probe_ok=true
+  else
+    probe_ok=false
+  fi
+  # A namespaced v2 root has memory.max; the machine's real root does not.
+  alpine_lxc=false
+  if [ -f /etc/alpine-release ] && [ -x /sbin/openrc-run ] && \
+      command -v rc-update >/dev/null 2>&1 && [ -f /sys/fs/cgroup/memory.max ] && \
+      [ "$(docker info --format '{{.CgroupDriver}}')" = cgroupfs ] && \
+      [ "$(docker info --format '{{.CgroupVersion}}')" = 2 ]; then
+    alpine_lxc=true
+  fi
+  service=/etc/init.d/alarm-cgroup-delegation
+  if [ "$alpine_lxc" = true ]; then
+    # Repair only the known delegation failure, not unrelated runtime failures.
+    needs_hook=false
+    if [ -f "$service" ] || grep -q '0::/host-processes$' /proc/1/cgroup; then
+      needs_hook=true
+    elif [ "$probe_ok" = false ] && grep -Eq 'memory.max|cpu.max|cgroup config|cgroup.subtree_control' "$probe_log"; then
+      for controller in cpu memory pids; do
+        grep -qw "$controller" /sys/fs/cgroup/cgroup.subtree_control || needs_hook=true
+      done
+    fi
+    if [ "$needs_hook" = true ]; then
+      [ "$(id -u)" = 0 ] || { rm -f "$probe_log"; fail 'Alpine LXC cgroup repair requires running the installer as root.'; }
+      if [ -L "$service" ] || { [ -e "$service" ] && ! grep -qx '# alarm-management-owned: cgroup-delegation-v1' "$service"; }; then
+        rm -f "$probe_log"
+        fail 'An unrelated alarm-cgroup-delegation service exists; it was not overwritten.'
+      fi
+      printf 'Repairing Alpine/OpenRC cgroup delegation and configuring it before Docker at boot.\n'
+      service_tmp=$(mktemp /etc/init.d/.alarm-cgroup-delegation.XXXXXX)
+      emit_cgroup_service > "$service_tmp"
+      if ! sh "$service_tmp" --repair || ! resource_probe >"$probe_log" 2>&1; then
+        cat "$probe_log" >&2
+        rm -f "$service_tmp" "$probe_log"
+        fail 'Cgroup repair could not verify resource limits. Setup stopped; check LXC controller delegation on the Proxmox host.'
+      fi
+      chmod 0755 "$service_tmp"
+      mv -f "$service_tmp" "$service"
+      rc-update add alarm-cgroup-delegation default || {
+        rm -f "$probe_log"
+        fail 'Resource limits work, but the boot hook could not be enabled. Fix OpenRC registration before setup.'
+      }
+      probe_ok=true
+      CGROUP_HOOK=true
+    fi
+  fi
+  if [ "$probe_ok" = false ]; then
+    cat "$probe_log" >&2
+    rm -f "$probe_log"
+    fail 'Docker resource-limit preflight failed before setup. Check host/LXC cgroup delegation; no limits were disabled and no site configuration was changed.'
+  fi
+  rm -f "$probe_log"
+  printf 'Docker resource-limit preflight passed.\n'
+}
+CGROUP_HOOK=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --directory|--ref|--portainer-url|--portainer-ca)
@@ -171,6 +312,8 @@ if __name__ == "__main__":
 fi
 fi
 
+resource_preflight
+
 if [ -n "$PORTAINER_URL" ]; then
   set -- docker run --rm --network host --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true
   if [ -n "$PORTAINER_CA" ]; then
@@ -200,4 +343,8 @@ fi
 set -- "$@" "$TOOLS_IMAGE" python /opt/tools/container-install.py
 if [ "$NO_UPDATER" = true ]; then set -- "$@" --no-updater; fi
 "$@"
-printf '\nContainers are visible in Portainer. No host service was installed.\n'
+if [ "$CGROUP_HOOK" = true ]; then
+  printf '\nContainers are visible in Portainer. Alpine cgroup boot repair is enabled; application services run in containers.\n'
+else
+  printf '\nContainers are visible in Portainer. No host service was installed.\n'
+fi

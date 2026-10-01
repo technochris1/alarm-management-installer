@@ -26,3 +26,7 @@ If Docker uses a host credential helper, use a dedicated login directory:
 `export DOCKER_CONFIG="$HOME/.config/alarm-docker"; docker login`, then rerun.
 Windows/Docker Desktop needs the Windows host discovery helper and is detected
 before Linux installation. No application volumes are removed during upgrades.
+Before the wizard, effective Docker memory, CPU and PID limits are checked.
+Known Alpine/OpenRC LXC cgroup delegation failures are repaired automatically,
+with a small host OpenRC boot hook before Docker; no host packages are installed.
+Unsupported resource-limit failures stop setup without disabling limits.
