@@ -1,7 +1,8 @@
 # Alarm management installer
 
 This public repository contains the Linux installer and public release metadata.
-Application code and the prebuilt Docker Hub images remain private.
+Application code stays private; images are intended for private distribution.
+The owner must publish the complete prebuilt image set before installation.
 
 On a native Linux Docker Engine host with Compose v2 and Portainer running,
 log in once with an account that can pull the private images:
