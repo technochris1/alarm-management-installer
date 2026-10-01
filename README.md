@@ -30,3 +30,5 @@ Before the wizard, effective Docker memory, CPU and PID limits are checked.
 Known Alpine/OpenRC LXC cgroup delegation failures are repaired automatically,
 with a small host OpenRC boot hook before Docker; no host packages are installed.
 Unsupported resource-limit failures stop setup without disabling limits.
+Docker storage is checked before downloads (at least 2 GiB and 4096 free inodes).
+Insufficient storage stops setup with expansion instructions; data is not pruned.

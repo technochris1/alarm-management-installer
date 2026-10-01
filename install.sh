@@ -174,6 +174,28 @@ resource_preflight() {
   printf 'Docker resource-limit preflight passed.\n'
 }
 CGROUP_HOOK=false
+disk_preflight() {
+  docker_root=$(docker info --format '{{.DockerRootDir}}')
+  case "$docker_root" in /*) ;; *) fail 'Docker did not report an absolute storage directory.';; esac
+  [ -d "$docker_root" ] || fail "Docker storage directory is not accessible on this host: $docker_root"
+  available_kb=$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')
+  inode_stats=$(df -Pi "$docker_root" | awk 'NR==2 {print $2, $4}')
+  inode_total=${inode_stats%% *}
+  available_inodes=${inode_stats#* }
+  case "$available_kb" in *[!0-9]*|'') fail 'Could not determine available Docker storage.';; esac
+  case "$inode_total" in *[!0-9]*|'') fail 'Could not determine Docker storage inode accounting.';; esac
+  # Btrfs and other dynamically allocated filesystems may report no fixed inode pool.
+  if [ "$inode_total" = 0 ]; then available_inodes=unmetered; fi
+  if [ "$available_inodes" != unmetered ]; then
+    case "$available_inodes" in *[!0-9]*|'') fail 'Could not determine available Docker storage inodes.';; esac
+  fi
+  inode_low=false
+  if [ "$available_inodes" != unmetered ] && [ "$available_inodes" -lt 4096 ]; then inode_low=true; fi
+  if [ "$available_kb" -lt 2097152 ] || [ "$inode_low" = true ]; then
+    fail "Docker storage preflight failed: $((available_kb / 1024)) MiB and $available_inodes inodes available at $docker_root. Setup needs at least 2048 MiB and 4096 free inodes before downloads. Expand the Docker/LXC storage, then rerun. No images, volumes or site configuration were removed."
+  fi
+  printf 'Docker storage preflight passed: %s MiB available.\n' "$((available_kb / 1024))"
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --directory|--ref|--portainer-url|--portainer-ca)
@@ -220,6 +242,7 @@ if [ -z "$PORTAINER_URL" ]; then
   printf '%s\n' "$images" | grep -Eq '(^|/)portainer/portainer-(ce|ee)(:|@|$)' || fail 'No running Portainer CE/EE server found. Start Portainer or supply --portainer-url.'
 fi
 
+disk_preflight
 case "$DEPLOYMENT_SOURCE" in registry|source) ;; *) fail 'ALARM_DEPLOYMENT_SOURCE must be registry or source.';; esac
 case "$IMAGE_REPOSITORY" in *[!a-z0-9_./-]*|'') fail 'Use a Docker Hub namespace/repository without credentials.';; esac
 printf '%s' "$IMAGE_REPOSITORY" | grep -Eq '^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._-]*$' || fail 'Use a Docker Hub namespace/repository.'
