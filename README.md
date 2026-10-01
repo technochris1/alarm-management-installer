@@ -16,16 +16,13 @@ Run as the same user with Docker and `/opt` access (normally root). Optional
 variables: `ALARM_INSTALL_DIR=/opt/alarms`, `ALARM_IMAGE_TAG=latest`, and
 `ALARM_PORTAINER_URL=https://portainer.example:9443`.
 
-Setup runs in a disposable container. The app, updater and native Linux LAN
-discovery run in separate containers; Android pairing comes afterward.
-The installer/updater require administrative Docker access. Discovery receives
-no Docker socket or site credentials. Registry pull credentials are retained in
+Setup runs in a disposable container. The app and updater run in separate containers; Android pairing comes afterward.
+The installer/updater require administrative Docker access. Registry pull credentials are retained in
 the private deployment secret directory for the updater.
 
 If Docker uses a host credential helper, use a dedicated login directory:
 `export DOCKER_CONFIG="$HOME/.config/alarm-docker"; docker login`, then rerun.
-Windows/Docker Desktop needs the Windows host discovery helper and is detected
-before Linux installation. No application volumes are removed during upgrades.
+Windows/Docker Desktop uses setup.ps1; Android devices import setup files. No application volumes are removed during upgrades.
 Before the wizard, effective Docker memory, CPU and PID limits are checked.
 Known Alpine/OpenRC LXC cgroup delegation failures are repaired automatically,
 with a small host OpenRC boot hook before Docker; no host packages are installed.

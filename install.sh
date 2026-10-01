@@ -25,11 +25,11 @@ Default: pull private prebuilt images after docker login on this host.
 Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 --source retains the developer build path; --ref selects its Git ref.
 
-Native Linux Docker Engine: setup, updater and discovery runtimes run in containers.
+Native Linux Docker Engine: setup and updater runtimes run in containers.
 Requires an existing local rootful Docker Engine, Compose v2 and Portainer.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
 Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
-Windows/Docker Desktop requires setup.ps1 and host discovery instead.
+Windows/Docker Desktop uses setup.ps1 instead.
 Existing installation files, configuration, volumes and secrets are preserved.
 EOF
 }
@@ -214,11 +214,11 @@ while [ "$#" -gt 0 ]; do
 done
 case "$(uname -s)" in
   Linux) ;;
-  MINGW*|MSYS*|CYGWIN*) fail 'Windows detected: run setup.ps1. The host updater/discovery helper is required outside Docker Desktop.';;
-  *) fail 'This helper supports native Linux Docker Engine. Docker Desktop requires host discovery.';;
+  MINGW*|MSYS*|CYGWIN*) fail 'Windows detected: run setup.ps1. Use the Windows deployment path.';;
+  *) fail 'This helper supports native Linux Docker Engine. Use setup.ps1 for Docker Desktop.';;
 esac
 if [ -n "${WSL_DISTRO_NAME:-}" ]; then
-  fail 'Windows/WSL detected: use setup.ps1 on Windows so discovery runs on the physical host.'
+  fail 'Windows/WSL detected: use setup.ps1 on Windows.'
 fi
 case "$(uname -r)" in *icrosoft*|*WSL*) fail 'Windows/WSL detected: use the Windows host installer.';; esac
 case "$INSTALL_DIR" in /*) ;; *) fail 'The installation directory must be absolute.';; esac
@@ -230,8 +230,8 @@ server_os=$(docker info --format '{{.OSType}}')
 engine_os=$(docker info --format '{{.OperatingSystem}}')
 security=$(docker info --format '{{json .SecurityOptions}}')
 [ "$server_os" = linux ] || fail 'Linux containers are required.'
-case "$engine_os" in *'Docker Desktop'*) fail 'Docker Desktop detected: host LAN discovery is required; use the host installer.';; esac
-case "$security" in *rootless*) fail 'Rootless Docker does not provide the native host-network discovery path. Use a rootful native Linux Engine or the documented host helper.';; esac
+case "$engine_os" in *'Docker Desktop'*) fail 'Docker Desktop detected: use setup.ps1 for this deployment.';; esac
+case "$security" in *rootless*) fail 'Rootless Docker is unsupported: this installer requires a rootful Engine for maintenance.';; esac
 endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
 case "$endpoint" in unix:///*) DOCKER_SOCKET=${endpoint#unix://};; *) fail 'Run this script on the Docker host using its local Unix socket; remote engines are not supported.';; esac
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet alarm-update-agent.service; then
