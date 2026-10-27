@@ -26,7 +26,7 @@ Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 --source retains the developer build path; --ref selects its Git ref.
 
 Native Linux Docker Engine: setup and updater runtimes run in containers.
-Requires an existing local rootful Docker Engine, Compose v2 and Portainer.
+Requires an existing local rootful Docker Engine and Compose v2.
 Docker Desktop for Linux on Ubuntu is supported when its Linux engine is selected.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
 Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
@@ -245,11 +245,6 @@ case "$endpoint" in unix:///*) DOCKER_SOCKET=${endpoint#unix://};; *) fail 'Run 
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet alarm-update-agent.service; then
   fail 'An existing host updater is active. Stop alarm-update-agent.service before switching to the updater container; no application configuration was changed.'
 fi
-if [ -z "$PORTAINER_URL" ]; then
-  images=$(docker ps --format '{{.Image}}')
-  printf '%s\n' "$images" | grep -Eq '(^|/)portainer/portainer-(ce|ee)(:|@|$)' || fail 'No running Portainer CE/EE server found. Start Portainer or supply --portainer-url.'
-fi
-
 disk_preflight
 case "$DEPLOYMENT_SOURCE" in registry|source) ;; *) fail 'ALARM_DEPLOYMENT_SOURCE must be registry or source.';; esac
 case "$IMAGE_REPOSITORY" in *[!a-z0-9_./-]*|'') fail 'Use a Docker Hub namespace/repository without credentials.';; esac
@@ -375,7 +370,7 @@ set -- "$@" "$TOOLS_IMAGE" python /opt/tools/container-install.py
 if [ "$NO_UPDATER" = true ]; then set -- "$@" --no-updater; fi
 "$@"
 if [ "$CGROUP_HOOK" = true ]; then
-  printf '\nContainers are visible in Portainer. Alpine cgroup boot repair is enabled; application services run in containers.\n'
+  printf '\nApplication services run in containers. Alpine cgroup boot repair is enabled.\n'
 else
-  printf '\nContainers are visible in Portainer. No host service was installed.\n'
+  printf '\nApplication services run in containers. No host service was installed.\n'
 fi
