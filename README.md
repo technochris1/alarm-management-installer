@@ -13,7 +13,9 @@ docker login
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/technochris1/alarm-management-installer/main/install.sh)"
 ```
 
-Run as the same user with Docker and `/opt` access (normally root). Optional
+Run as the same user with Docker access. Native Linux installs use `/opt` and
+need permission to write there; Docker Desktop for Linux defaults to
+`$HOME/alarm-management-system`. Optional
 variables: `ALARM_INSTALL_DIR=/opt/alarms`, `ALARM_IMAGE_TAG=latest`, and
 `ALARM_PORTAINER_URL=https://portainer.example:9443`.
 

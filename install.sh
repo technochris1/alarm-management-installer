@@ -4,6 +4,8 @@ set -eu
 REPOSITORY=technochris1/Open-Source-Alarm-Management-System
 BOOTSTRAP_IMAGE=python:3.12-alpine@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a
 INSTALL_DIR=${ALARM_INSTALL_DIR:-/opt/alarm-management-system}
+INSTALL_DIR_EXPLICIT=false
+[ -n "${ALARM_INSTALL_DIR:-}" ] && INSTALL_DIR_EXPLICIT=true
 REF=${ALARM_INSTALL_REF:-main}
 PORTAINER_URL=${ALARM_PORTAINER_URL:-}
 PORTAINER_CA=${ALARM_PORTAINER_CA:-}
@@ -208,7 +210,7 @@ while [ "$#" -gt 0 ]; do
     --directory|--ref|--portainer-url|--portainer-ca)
       [ "$#" -ge 2 ] || fail "Missing value for $1"
       case "$1" in
-        --directory) INSTALL_DIR=$2;; --ref) REF=$2;;
+        --directory) INSTALL_DIR=$2; INSTALL_DIR_EXPLICIT=true;; --ref) REF=$2;;
         --portainer-url) PORTAINER_URL=$2;; --portainer-ca) PORTAINER_CA=$2;;
       esac
       shift 2;;
@@ -228,8 +230,6 @@ if [ -n "${WSL_DISTRO_NAME:-}" ]; then
   fail 'Windows/WSL detected: use setup.ps1 on Windows.'
 fi
 case "$(uname -r)" in *icrosoft*|*WSL*) fail 'Windows/WSL detected: use the Windows host installer.';; esac
-case "$INSTALL_DIR" in /*) ;; *) fail 'The installation directory must be absolute.';; esac
-case "$INSTALL_DIR" in *[!a-zA-Z0-9_./-]*|/) fail 'Choose a directory without spaces or special characters.';; esac
 command -v docker >/dev/null 2>&1 || fail 'Docker is required. No host packages were installed.'
 docker info >/dev/null 2>&1 || fail 'Docker is not running or this user cannot access it.'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required.'
@@ -239,6 +239,11 @@ security=$(docker info --format '{{json .SecurityOptions}}')
 [ "$server_os" = linux ] || fail 'Linux containers are required.'
 DOCKER_DESKTOP=false
 case "$engine_os" in *'Docker Desktop'*) DOCKER_DESKTOP=true;; esac
+if [ "$DOCKER_DESKTOP" = true ] && [ "$INSTALL_DIR_EXPLICIT" = false ]; then
+  INSTALL_DIR=${HOME:?HOME is required for Docker Desktop installs}/alarm-management-system
+fi
+case "$INSTALL_DIR" in /*) ;; *) fail 'The installation directory must be absolute.';; esac
+case "$INSTALL_DIR" in *[!a-zA-Z0-9_./-]*|/) fail 'Choose a directory without spaces or special characters.';; esac
 case "$security" in *rootless*) fail 'Rootless Docker is unsupported: this installer requires a rootful Engine for maintenance.';; esac
 endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
 case "$endpoint" in unix:///*) DOCKER_SOCKET=${endpoint#unix://};; *) fail 'Run this script on the Docker host using its local Unix socket; remote engines are not supported.';; esac
