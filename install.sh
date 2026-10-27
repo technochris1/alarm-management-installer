@@ -359,21 +359,36 @@ mkdir -p "$INSTALL_DIR"
 INSTALL_DIR=$(CDPATH= cd -- "$INSTALL_DIR" && pwd -P)
 case "$INSTALL_DIR" in /|*[!a-zA-Z0-9_./-]*) fail 'The resolved installation directory is not supported.';; esac
 printf '\nInstalling in %s. The wizard runs in a disposable container.\n' "$INSTALL_DIR"
-set -- docker run --rm -i
-if [ -t 0 ] && [ -t 1 ]; then set -- "$@" -t; fi
-set -- "$@" --network host --mount "type=bind,source=$DOCKER_SOCKET,target=/var/run/docker.sock" \
-  --mount "type=bind,source=$INSTALL_DIR,target=$INSTALL_DIR" \
-  --workdir "$INSTALL_DIR" --env "ALARM_DOCKER_SOCKET=$DOCKER_SOCKET"
-if [ "$DEPLOYMENT_SOURCE" = registry ]; then
-  docker_config=${DOCKER_CONFIG:-${HOME:?HOME or DOCKER_CONFIG is required}/.docker}/config.json
-  if [ -r "$docker_config" ]; then
-    set -- "$@" --mount "type=bind,source=$docker_config,target=/run/host-docker-config.json,readonly"
+docker_config=${DOCKER_CONFIG:-${HOME:?HOME or DOCKER_CONFIG is required}/.docker}/config.json
+if [ "$DEPLOYMENT_SOURCE" = registry ] && {
+  [ ! -r "$docker_config" ] || grep -Eq '"credsStore"[[:space:]]*:|"credHelpers"[[:space:]]*:' "$docker_config"
+}; then
+  fallback_config=${HOME:?HOME is required}/.config/alarm-docker
+  mkdir -p "$fallback_config"
+  chmod 0700 "$fallback_config"
+  if [ ! -r "$fallback_config/config.json" ]; then
+    printf '\nDocker Hub credentials need a dedicated config for the updater. Log in when prompted.\n'
+    DOCKER_CONFIG="$fallback_config" docker login || fail 'Docker Hub login failed; setup was not completed.'
   fi
-  set -- "$@" --env ALARM_DEPLOYMENT_SOURCE=registry --env "ALARM_OPERATIONS_IMAGE=$TOOLS_IMAGE"
+  docker_config=$fallback_config/config.json
 fi
-set -- "$@" "$TOOLS_IMAGE" python /opt/tools/container-install.py
-if [ "$NO_UPDATER" = true ]; then set -- "$@" --no-updater; fi
-"$@"
+run_setup() {
+  set -- docker run --rm -i
+  if [ -t 0 ] && [ -t 1 ]; then set -- "$@" -t; fi
+  set -- "$@" --network host --mount "type=bind,source=$DOCKER_SOCKET,target=/var/run/docker.sock" \
+    --mount "type=bind,source=$INSTALL_DIR,target=$INSTALL_DIR" \
+    --workdir "$INSTALL_DIR" --env "ALARM_DOCKER_SOCKET=$DOCKER_SOCKET"
+  if [ "$DEPLOYMENT_SOURCE" = registry ]; then
+    if [ -r "$docker_config" ]; then
+      set -- "$@" --mount "type=bind,source=$docker_config,target=/run/host-docker-config.json,readonly"
+    fi
+    set -- "$@" --env ALARM_DEPLOYMENT_SOURCE=registry --env "ALARM_OPERATIONS_IMAGE=$TOOLS_IMAGE"
+  fi
+  set -- "$@" "$TOOLS_IMAGE" python /opt/tools/container-install.py
+  if [ "$NO_UPDATER" = true ]; then set -- "$@" --no-updater; fi
+  "$@"
+}
+run_setup
 if [ "$CGROUP_HOOK" = true ]; then
   printf '\nApplication services run in containers. Alpine cgroup boot repair is enabled.\n'
 else

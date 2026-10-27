@@ -23,8 +23,9 @@ Setup runs in a disposable container. The app and updater run in separate contai
 The installer/updater require administrative Docker access. Registry pull credentials are retained in
 the private deployment secret directory for the updater.
 
-If Docker uses a host credential helper, use a dedicated login directory:
-`export DOCKER_CONFIG="$HOME/.config/alarm-docker"; docker login`, then rerun.
+If Docker Hub credentials are stored in a host credential helper, the installer
+prompts for a Docker Hub login and saves a dedicated config at
+`$HOME/.config/alarm-docker` so the updater can read it.
 Windows uses setup.ps1; Docker Desktop for Linux can use the command above
 when its Linux engine is selected. Desktop manages storage inside its VM, so
 the installer cannot measure free space in that disk; confirm it has at least
