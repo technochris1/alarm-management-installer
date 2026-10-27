@@ -27,9 +27,10 @@ Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 
 Native Linux Docker Engine: setup and updater runtimes run in containers.
 Requires an existing local rootful Docker Engine, Compose v2 and Portainer.
+Docker Desktop for Linux on Ubuntu is supported when its Linux engine is selected.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
 Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
-Windows/Docker Desktop uses setup.ps1 instead.
+Windows uses setup.ps1 instead. Docker Desktop storage is managed by its VM.
 Existing installation files, configuration, volumes and secrets are preserved.
 EOF
 }
@@ -175,6 +176,12 @@ resource_preflight() {
 }
 CGROUP_HOOK=false
 disk_preflight() {
+  if [ "$DOCKER_DESKTOP" = true ]; then
+    # Docker Desktop stores images inside its managed VM disk; DockerRootDir is
+    # therefore not a host path whose free space can be measured with df.
+    printf 'Docker Desktop detected; its managed VM disk cannot be checked from the host.\n'
+    return
+  fi
   docker_root=$(docker info --format '{{.DockerRootDir}}')
   case "$docker_root" in /*) ;; *) fail 'Docker did not report an absolute storage directory.';; esac
   [ -d "$docker_root" ] || fail "Docker storage directory is not accessible on this host: $docker_root"
@@ -230,7 +237,8 @@ server_os=$(docker info --format '{{.OSType}}')
 engine_os=$(docker info --format '{{.OperatingSystem}}')
 security=$(docker info --format '{{json .SecurityOptions}}')
 [ "$server_os" = linux ] || fail 'Linux containers are required.'
-case "$engine_os" in *'Docker Desktop'*) fail 'Docker Desktop detected: use setup.ps1 for this deployment.';; esac
+DOCKER_DESKTOP=false
+case "$engine_os" in *'Docker Desktop'*) DOCKER_DESKTOP=true;; esac
 case "$security" in *rootless*) fail 'Rootless Docker is unsupported: this installer requires a rootful Engine for maintenance.';; esac
 endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
 case "$endpoint" in unix:///*) DOCKER_SOCKET=${endpoint#unix://};; *) fail 'Run this script on the Docker host using its local Unix socket; remote engines are not supported.';; esac

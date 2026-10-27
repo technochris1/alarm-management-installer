@@ -4,7 +4,8 @@ This public repository contains the Linux installer and public release metadata.
 Application code stays private; images are intended for private distribution.
 The owner must publish the complete prebuilt image set before installation.
 
-On a native Linux Docker Engine host with Compose v2 and Portainer running,
+On Ubuntu with Docker Desktop for Linux or a native Linux Docker Engine, with
+Compose v2 and Portainer running,
 log in once with an account that can pull the private images:
 
 ```sh
@@ -22,7 +23,11 @@ the private deployment secret directory for the updater.
 
 If Docker uses a host credential helper, use a dedicated login directory:
 `export DOCKER_CONFIG="$HOME/.config/alarm-docker"; docker login`, then rerun.
-Windows/Docker Desktop uses setup.ps1; Android devices import setup files. No application volumes are removed during upgrades.
+Windows uses setup.ps1; Docker Desktop for Linux can use the command above
+when its Linux engine is selected. Desktop manages storage inside its VM, so
+the installer cannot measure free space in that disk; confirm it has at least
+2 GiB available. Android devices import setup files. No application volumes
+are removed during upgrades.
 Before the wizard, effective Docker memory, CPU and PID limits are checked.
 Known Alpine/OpenRC LXC cgroup delegation failures are repaired automatically,
 with a small host OpenRC boot hook before Docker; no host packages are installed.
