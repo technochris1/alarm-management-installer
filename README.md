@@ -4,8 +4,7 @@ This public repository contains the Linux installer and public release metadata.
 Application code stays private; images are intended for private distribution.
 The owner must publish the complete prebuilt image set before installation.
 
-On Ubuntu with Docker Desktop for Linux or a native Linux Docker Engine, with
-Compose v2,
+On a native Linux Docker Engine host with Compose v2 and Portainer running,
 log in once with an account that can pull the private images:
 
 ```sh
@@ -13,24 +12,24 @@ docker login
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/technochris1/alarm-management-installer/main/install.sh)"
 ```
 
-Run as the same user with Docker access. Native Linux installs use `/opt` and
-need permission to write there; Docker Desktop for Linux defaults to
-`$HOME/alarm-management-system`. Optional
+Run as the same user with Docker and `/opt` access (normally root). Optional
 variables: `ALARM_INSTALL_DIR=/opt/alarms`, `ALARM_IMAGE_TAG=latest`, and
 `ALARM_PORTAINER_URL=https://portainer.example:9443`.
 
-Setup runs in a disposable container. The app and updater run in separate containers; Portainer is optional for viewing and managing them. Android pairing comes afterward.
-The installer/updater require administrative Docker access. Registry pull credentials are retained in
-the private deployment secret directory for the updater.
+Setup runs in a disposable container. The app and internal operations worker run in separate containers; Android pairing comes afterward.
+Rerunning the installer detects existing alarm sites and offers a host-approved
+Site Maintenance update, configuration repair, or cancellation. Multiple sites
+require `--directory /existing/site`. Use `--update --manifest HTTPS-URL` to prepare
+an update directly; applying still requires typed `APPLY` approval on the host.
+The web application shows read-only maintenance status and cannot initiate updates.
+The installer/maintenance require administrative Docker access. Registry pull credentials are retained in
+the private deployment secret directory for maintenance.
 
-If Docker Hub credentials are stored in a host credential helper, the installer
-prompts for a Docker Hub login and saves a dedicated config at
-`$HOME/.config/alarm-docker` so the updater can read it.
-Windows uses setup.ps1; Docker Desktop for Linux can use the command above
-when its Linux engine is selected. Desktop manages storage inside its VM, so
-the installer cannot measure free space in that disk; confirm it has at least
-2 GiB available. Android devices import setup files. No application volumes
-are removed during upgrades.
+If Docker uses a host credential helper, use a dedicated login directory:
+`export DOCKER_CONFIG="$HOME/.config/alarm-docker"; docker login`, then rerun.
+Windows needs its Windows host discovery helper. On Linux, Docker Desktop is
+detected and rejected with native Engine instructions; PowerShell is not used.
+No application volumes are removed during upgrades.
 Before the wizard, effective Docker memory, CPU and PID limits are checked.
 Known Alpine/OpenRC LXC cgroup delegation failures are repaired automatically,
 with a small host OpenRC boot hook before Docker; no host packages are installed.

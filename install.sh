@@ -4,12 +4,18 @@ set -eu
 REPOSITORY=technochris1/Open-Source-Alarm-Management-System
 BOOTSTRAP_IMAGE=python:3.12-alpine@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a
 INSTALL_DIR=${ALARM_INSTALL_DIR:-/opt/alarm-management-system}
-INSTALL_DIR_EXPLICIT=false
-[ -n "${ALARM_INSTALL_DIR:-}" ] && INSTALL_DIR_EXPLICIT=true
+DIRECTORY_EXPLICIT=false
+[ -z "${ALARM_INSTALL_DIR:-}" ] || DIRECTORY_EXPLICIT=true
+INSTALL_ACTION=auto
+HOST_ACTION=''
+TLS_HOST=''
+TLS_HTTPS_PORT=8443
+TLS_MQTT_PORT=18885
+SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MANIFEST=${ALARM_RELEASE_MANIFEST:-}
 REF=${ALARM_INSTALL_REF:-main}
 PORTAINER_URL=${ALARM_PORTAINER_URL:-}
 PORTAINER_CA=${ALARM_PORTAINER_CA:-}
-NO_UPDATER=false
 DEPLOYMENT_SOURCE=${ALARM_DEPLOYMENT_SOURCE:-registry}
 IMAGE_REPOSITORY=${ALARM_IMAGE_REPOSITORY:-technochris1/opensourcealarmmanagementsystem}
 IMAGE_TAG=${ALARM_IMAGE_TAG:-latest}
@@ -18,7 +24,13 @@ usage() {
   cat <<'EOF'
 Usage: sh install.sh [--directory /absolute/path] [--ref branch-or-tag]
                      [--portainer-url https://host:9443] [--portainer-ca /path/ca.pem]
-                     [--no-updater] [--source]
+                     [--install|--update|--configure] [--manifest HTTPS-URL]
+                     [--source]
+
+Existing-site commands: --prepare, --apply, --status, --logs, --retry,
+--cancel, --revert, --restore, --backup, --cleanup-alarms.
+--mobile-tls --host <LAN-IP-or-DNS> [--https-port 8443] [--mqtt-tls-port 18885].
+These use the selected site's installed runtime without pulling a new installer.
 
 Optional environment defaults: ALARM_INSTALL_DIR, ALARM_INSTALL_REF,
 ALARM_PORTAINER_URL and ALARM_PORTAINER_CA. Command-line flags take precedence.
@@ -27,13 +39,15 @@ Default: pull private prebuilt images after docker login on this host.
 Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 --source retains the developer build path; --ref selects its Git ref.
 
-Native Linux Docker Engine: setup and updater runtimes run in containers.
-Requires an existing local rootful Docker Engine and Compose v2.
-Docker Desktop for Linux on Ubuntu is supported when its Linux engine is selected.
+Native Linux Docker Engine: setup and normal application services run in containers.
+Requires an existing local rootful Docker Engine, Compose v2 and Portainer.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
 Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
-Windows uses setup.ps1 instead. Docker Desktop storage is managed by its VM.
+Windows requires setup.ps1 and host discovery. On Linux, use native rootful Docker Engine;
+Docker Desktop's Linux engine cannot provide the supported host-network discovery path.
 Existing installation files, configuration, volumes and secrets are preserved.
+An existing site is offered a host-approved Site Maintenance update.
+--directory selects a particular site; multiple detected sites require selection.
 EOF
 }
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -178,12 +192,6 @@ resource_preflight() {
 }
 CGROUP_HOOK=false
 disk_preflight() {
-  if [ "$DOCKER_DESKTOP" = true ]; then
-    # Docker Desktop stores images inside its managed VM disk; DockerRootDir is
-    # therefore not a host path whose free space can be measured with df.
-    printf 'Docker Desktop detected; its managed VM disk cannot be checked from the host.\n'
-    return
-  fi
   docker_root=$(docker info --format '{{.DockerRootDir}}')
   case "$docker_root" in /*) ;; *) fail 'Docker did not report an absolute storage directory.';; esac
   [ -d "$docker_root" ] || fail "Docker storage directory is not accessible on this host: $docker_root"
@@ -207,29 +215,37 @@ disk_preflight() {
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --directory|--ref|--portainer-url|--portainer-ca)
+    --directory|--ref|--portainer-url|--portainer-ca|--manifest|--host|--https-port|--mqtt-tls-port)
       [ "$#" -ge 2 ] || fail "Missing value for $1"
       case "$1" in
-        --directory) INSTALL_DIR=$2; INSTALL_DIR_EXPLICIT=true;; --ref) REF=$2;;
+        --directory) INSTALL_DIR=$2; DIRECTORY_EXPLICIT=true;; --ref) REF=$2;;
         --portainer-url) PORTAINER_URL=$2;; --portainer-ca) PORTAINER_CA=$2;;
+        --manifest) MANIFEST=$2;;
+        --host) TLS_HOST=$2;; --https-port) TLS_HTTPS_PORT=$2;; --mqtt-tls-port) TLS_MQTT_PORT=$2;;
       esac
       shift 2;;
-    --no-updater|--no-service) NO_UPDATER=true; shift;;
     --source) DEPLOYMENT_SOURCE=source; shift;;
-    --install-service) fail 'Linux uses an updater container now; omit --install-service.';;
+    --install|--update|--configure)
+      [ "$INSTALL_ACTION" = auto ] && [ -z "$HOST_ACTION" ] || fail 'Select only one action.'
+      INSTALL_ACTION=${1#--}; shift;;
+    --prepare|--apply|--status|--logs|--retry|--cancel|--revert|--restore|--backup|--cleanup-alarms|--mobile-tls)
+      [ "$INSTALL_ACTION" = auto ] && [ -z "$HOST_ACTION" ] || fail 'Select only one action.'
+      HOST_ACTION=${1#--}; shift;;
     --help|-h) usage; exit 0;;
     *) usage >&2; fail "Unknown argument: $1";;
   esac
 done
 case "$(uname -s)" in
   Linux) ;;
-  MINGW*|MSYS*|CYGWIN*) fail 'Windows detected: run setup.ps1. Use the Windows deployment path.';;
-  *) fail 'This helper supports native Linux Docker Engine. Use setup.ps1 for Docker Desktop.';;
+  MINGW*|MSYS*|CYGWIN*) fail 'Windows detected: run install.ps1. Use the Windows deployment path.';;
+  *) fail 'This helper supports native Linux Docker Engine. Use install.ps1 for Docker Desktop.';;
 esac
 if [ -n "${WSL_DISTRO_NAME:-}" ]; then
-  fail 'Windows/WSL detected: use setup.ps1 on Windows.'
+  fail 'Windows/WSL detected: use install.ps1 on Windows.'
 fi
 case "$(uname -r)" in *icrosoft*|*WSL*) fail 'Windows/WSL detected: use the Windows host installer.';; esac
+case "$INSTALL_DIR" in /*) ;; *) fail 'The installation directory must be absolute.';; esac
+case "$INSTALL_DIR" in *[!a-zA-Z0-9_./-]*|/) fail 'Choose a directory without spaces or special characters.';; esac
 command -v docker >/dev/null 2>&1 || fail 'Docker is required. No host packages were installed.'
 docker info >/dev/null 2>&1 || fail 'Docker is not running or this user cannot access it.'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required.'
@@ -237,19 +253,62 @@ server_os=$(docker info --format '{{.OSType}}')
 engine_os=$(docker info --format '{{.OperatingSystem}}')
 security=$(docker info --format '{{json .SecurityOptions}}')
 [ "$server_os" = linux ] || fail 'Linux containers are required.'
-DOCKER_DESKTOP=false
-case "$engine_os" in *'Docker Desktop'*) DOCKER_DESKTOP=true;; esac
-if [ "$DOCKER_DESKTOP" = true ] && [ "$INSTALL_DIR_EXPLICIT" = false ]; then
-  INSTALL_DIR=${HOME:?HOME is required for Docker Desktop installs}/alarm-management-system
+case "$engine_os" in *'Docker Desktop'*) fail 'Ubuntu/Linux detected, but Docker Desktop is selected. This installer does not use PowerShell on Linux. Switch the Docker CLI to a local rootful Docker Engine context and rerun; the native Engine setup is documented at https://docs.docker.com/engine/install/ubuntu/.';; esac
+case "$security" in *rootless*) fail 'Rootless Docker does not provide the native host-network discovery path. Use a rootful native Linux Engine or the documented host helper.';; esac
+endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
+case "$endpoint" in unix:///*) DOCKER_SOCKET=${endpoint#unix://};; *) fail 'Run this script on the Docker host using its local Unix socket; remote engines are not supported.';; esac
+if [ "$DIRECTORY_EXPLICIT" = false ]; then
+  if [ -f "$SCRIPT_ROOT/.env" ] && [ -f "$SCRIPT_ROOT/docker-compose.yml" ]; then INSTALL_DIR=$SCRIPT_ROOT; fi
+  # Stopped sites count too. Read only labelled app directories, then verify
+  # their alarm-specific deployment files; unrelated Compose apps are ignored.
+  directories=$(docker ps -a --filter label=com.docker.compose.service=app --format '{{.Label "com.docker.compose.project.working_dir"}}' | sort -u)
+  detected=''
+  count=0
+  if [ -f "$INSTALL_DIR/.env" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+    detected=$INSTALL_DIR; count=1
+  fi
+  while IFS= read -r candidate; do
+    case "$candidate" in /*) ;; *) continue;; esac
+    case "$candidate" in *[!a-zA-Z0-9_./-]*|/) continue;; esac
+    [ -f "$candidate/.env" ] && [ -f "$candidate/docker-compose.yml" ] || continue
+    grep -q 'opensourcealarmmanagementsystem' "$candidate/docker-compose.yml" "$candidate/.env" || continue
+    [ "$candidate" = "$detected" ] && continue
+    printf 'Detected alarm installation: %s\n' "$candidate"
+    detected=$candidate; count=$((count + 1))
+  done <<EOF
+$directories
+EOF
+  [ "$count" -le 1 ] || fail 'Multiple alarm sites were detected. Rerun with --directory /existing/site to select one.'
+  if [ "$count" = 1 ]; then INSTALL_DIR=$detected; fi
 fi
 case "$INSTALL_DIR" in /*) ;; *) fail 'The installation directory must be absolute.';; esac
 case "$INSTALL_DIR" in *[!a-zA-Z0-9_./-]*|/) fail 'Choose a directory without spaces or special characters.';; esac
-case "$security" in *rootless*) fail 'Rootless Docker is unsupported: this installer requires a rootful Engine for maintenance.';; esac
-endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
-case "$endpoint" in unix:///*) DOCKER_SOCKET=${endpoint#unix://};; *) fail 'Run this script on the Docker host using its local Unix socket; remote engines are not supported.';; esac
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet alarm-update-agent.service; then
-  fail 'An existing host updater is active. Stop alarm-update-agent.service before switching to the updater container; no application configuration was changed.'
+if [ -n "$HOST_ACTION" ]; then
+  [ -f "$INSTALL_DIR/.env" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ] || fail 'This action requires an existing alarm site.'
+  case "$HOST_ACTION" in
+    cleanup-alarms)
+      cd "$INSTALL_DIR"
+      exec docker compose exec -T app python -m app.alarm_cache_maintenance;;
+    mobile-tls)
+      [ -n "$TLS_HOST" ] || fail 'Mobile TLS requires --host with the exact LAN IP or DNS hostname.'
+      IMAGE=$(sed -n 's/^APP_IMAGE=//p' "$INSTALL_DIR/.env" | head -n 1 | tr -d '\r')
+      [ -n "$IMAGE" ] || fail 'Record the installed APP_IMAGE before configuring TLS.'
+      docker run --rm -i --pull never --network none --user 0 --read-only --tmpfs /tmp --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --security-opt no-new-privileges:true \
+        --mount "type=bind,source=$INSTALL_DIR,target=$INSTALL_DIR" "$IMAGE" python - --directory "$INSTALL_DIR" --host "$TLS_HOST" --https-port "$TLS_HTTPS_PORT" --mqtt-port "$TLS_MQTT_PORT" < "$INSTALL_DIR/scripts/setup-mobile-tls.py"
+      printf 'Configuration saved. Use --configure to apply the reviewed listener settings.\n'
+      exit 0;;
+    backup) ALARM_SITE_ROOT="$INSTALL_DIR" exec sh "$INSTALL_DIR/scripts/backup.sh";;
+    *) ALARM_SITE_ROOT="$INSTALL_DIR" exec sh "$INSTALL_DIR/scripts/site-maintenance.sh" "$HOST_ACTION" "$MANIFEST";;
+  esac
 fi
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet alarm-update-agent.service; then
+  fail 'An existing host updater is active. Stop alarm-update-agent.service before using Docker-managed broker operations; no application configuration was changed.'
+fi
+if [ -z "$PORTAINER_URL" ]; then
+  images=$(docker ps --format '{{.Image}}')
+  printf '%s\n' "$images" | grep -Eq '(^|/)portainer/portainer-(ce|ee)(:|@|$)' || fail 'No running Portainer CE/EE server found. Start Portainer or supply --portainer-url.'
+fi
+
 disk_preflight
 case "$DEPLOYMENT_SOURCE" in registry|source) ;; *) fail 'ALARM_DEPLOYMENT_SOURCE must be registry or source.';; esac
 case "$IMAGE_REPOSITORY" in *[!a-z0-9_./-]*|'') fail 'Use a Docker Hub namespace/repository without credentials.';; esac
@@ -359,38 +418,24 @@ mkdir -p "$INSTALL_DIR"
 INSTALL_DIR=$(CDPATH= cd -- "$INSTALL_DIR" && pwd -P)
 case "$INSTALL_DIR" in /|*[!a-zA-Z0-9_./-]*) fail 'The resolved installation directory is not supported.';; esac
 printf '\nInstalling in %s. The wizard runs in a disposable container.\n' "$INSTALL_DIR"
-docker_config=${DOCKER_CONFIG:-${HOME:?HOME or DOCKER_CONFIG is required}/.docker}/config.json
-if [ "$DEPLOYMENT_SOURCE" = registry ] && {
-  [ ! -r "$docker_config" ] || grep -Eq '"credsStore"[[:space:]]*:|"credHelpers"[[:space:]]*:' "$docker_config"
-}; then
-  fallback_config=${HOME:?HOME is required}/.config/alarm-docker
-  mkdir -p "$fallback_config"
-  chmod 0700 "$fallback_config"
-  if [ ! -r "$fallback_config/config.json" ]; then
-    printf '\nDocker Hub credentials need a dedicated config for the updater. Log in when prompted.\n'
-    DOCKER_CONFIG="$fallback_config" docker login || fail 'Docker Hub login failed; setup was not completed.'
+set -- docker run --rm -i
+if [ -t 0 ] && [ -t 1 ]; then set -- "$@" -t; fi
+set -- "$@" --network host --mount "type=bind,source=$DOCKER_SOCKET,target=/var/run/docker.sock" \
+  --mount "type=bind,source=$INSTALL_DIR,target=$INSTALL_DIR" \
+  --workdir "$INSTALL_DIR" --env "ALARM_DOCKER_SOCKET=$DOCKER_SOCKET"
+if [ "$DEPLOYMENT_SOURCE" = registry ]; then
+  docker_config=${DOCKER_CONFIG:-${HOME:?HOME or DOCKER_CONFIG is required}/.docker}/config.json
+  if [ -r "$docker_config" ]; then
+    set -- "$@" --mount "type=bind,source=$docker_config,target=/run/host-docker-config.json,readonly"
   fi
-  docker_config=$fallback_config/config.json
+  set -- "$@" --env ALARM_DEPLOYMENT_SOURCE=registry --env "ALARM_OPERATIONS_IMAGE=$TOOLS_IMAGE"
 fi
-run_setup() {
-  set -- docker run --rm -i
-  if [ -t 0 ] && [ -t 1 ]; then set -- "$@" -t; fi
-  set -- "$@" --network host --mount "type=bind,source=$DOCKER_SOCKET,target=/var/run/docker.sock" \
-    --mount "type=bind,source=$INSTALL_DIR,target=$INSTALL_DIR" \
-    --workdir "$INSTALL_DIR" --env "ALARM_DOCKER_SOCKET=$DOCKER_SOCKET"
-  if [ "$DEPLOYMENT_SOURCE" = registry ]; then
-    if [ -r "$docker_config" ]; then
-      set -- "$@" --mount "type=bind,source=$docker_config,target=/run/host-docker-config.json,readonly"
-    fi
-    set -- "$@" --env ALARM_DEPLOYMENT_SOURCE=registry --env "ALARM_OPERATIONS_IMAGE=$TOOLS_IMAGE"
-  fi
-  set -- "$@" "$TOOLS_IMAGE" python /opt/tools/container-install.py
-  if [ "$NO_UPDATER" = true ]; then set -- "$@" --no-updater; fi
-  "$@"
-}
-run_setup
+set -- "$@" "$TOOLS_IMAGE" python /opt/tools/container-install.py
+set -- "$@" --action "$INSTALL_ACTION"
+if [ -n "$MANIFEST" ]; then set -- "$@" --manifest "$MANIFEST"; fi
+"$@"
 if [ "$CGROUP_HOOK" = true ]; then
-  printf '\nApplication services run in containers. Alpine cgroup boot repair is enabled.\n'
+  printf '\nContainers are visible in Portainer. Alpine cgroup boot repair is enabled; application services run in containers.\n'
 else
-  printf '\nApplication services run in containers. No host service was installed.\n'
+  printf '\nContainers are visible in Portainer. No host service was installed.\n'
 fi
