@@ -1,8 +1,26 @@
 # Alarm management installer
 
-This public repository contains the Linux installer and public release metadata.
+This public repository contains the Linux installer, Proxmox helper and public release metadata.
 Application code stays private; images are intended for private distribution.
 The owner must publish the complete prebuilt image set before installation.
+
+For a Community Scripts-style Proxmox LXC wizard, run on the Proxmox node:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/technochris1/alarm-management-installer/main/proxmox.sh -o /tmp/alarm-proxmox.sh
+bash /tmp/alarm-proxmox.sh
+```
+
+This project maintains the helper independently. It creates an unprivileged
+Debian 13 LXC, installs Docker/Compose and Portainer inside it, then runs the normal
+registry installer. No Docker packages are installed on the Proxmox node.
+Choose resources, storage, bridge, VLAN, DHCP/static IPv4 and DNS in the wizard.
+Registry login and site settings remain interactive. Portainer HTTPS uses guest
+port 9443; initialize its administrator promptly. Later run `update` inside the
+LXC or choose Update in the helper with the existing CT ID and site directory.
+Updates use the installed `install.sh`, with preparation and typed `APPLY`.
+Failures retain the CT/disks; never recreate over existing data. Existing unrelated
+`update` commands are refused rather than replaced.
 
 On a native Linux Docker Engine host with Compose v2 and Portainer running,
 log in once with an account that can pull the private images:
