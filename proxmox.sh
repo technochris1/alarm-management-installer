@@ -11,9 +11,9 @@ Alarm Management System — Proxmox setup and update
 Run on the Proxmox node as root, with an interactive terminal:
   bash proxmox.sh                         # guided menu
   bash proxmox.sh --create                # create a Debian 13 LXC
-  bash proxmox.sh --update --ctid 120      # update an existing site
-  bash proxmox.sh --status --ctid 120      # maintenance status
-Optional: --directory /opt/alarms (default /opt/alarm-management-system)
+  bash proxmox.sh --update                 # detect and update the existing site
+  bash proxmox.sh --status                 # detect and show maintenance status
+Optional overrides: --ctid 120 --directory /opt/alarms
 Inside a provisioned LXC: update, or alarm-setup to resume initial setup.
 Creation asks about CT ID, resources, storage, bridge, VLAN and IPv4/DNS.
 Existing sites use their own install.sh and its typed update approval.
@@ -186,6 +186,95 @@ push_guest() {
   pct exec "$CTID" --keep-env 0 -- bash "$remote" --guest "--$ACTION" --directory "$DIRECTORY"
 }
 
+site_directory_in_guest() {
+  local id=$1
+  pct exec "$id" --keep-env 0 -- sh -c '
+    directory=
+    if [ -f /etc/alarm-proxmox-site ]; then
+      IFS= read -r directory < /etc/alarm-proxmox-site || exit 1
+    elif [ -f /opt/alarm-management-system/.env ]; then
+      directory=/opt/alarm-management-system
+    else
+      exit 1
+    fi
+    case "$directory" in /*) ;; *) exit 1;; esac
+    [ -f "$directory/.env" ] && [ -f "$directory/docker-compose.yml" ] && [ -f "$directory/install.sh" ] || exit 1
+    printf "%s" "$directory"
+  ' 2>/dev/null
+}
+
+discover_existing_sites() {
+  local id directory hostname
+  while IFS= read -r id; do
+    [[ $id =~ ^[0-9]+$ ]] || continue
+    pct status "$id" 2>/dev/null | grep -q 'status: running' || continue
+    directory=$(site_directory_in_guest "$id") || continue
+    hostname=$(pct config "$id" 2>/dev/null | sed -n 's/^hostname: //p' | head -n 1)
+    [[ -n $hostname ]] || hostname="CT $id"
+    printf '%s\t%s\t%s\n' "$id" "$hostname" "$directory"
+  done < <(pct list | awk 'NR > 1 {print $1}')
+}
+
+resolve_existing_site() {
+  local row selected label requested_directory=$DIRECTORY
+  local -a matches=() menu_args=() labels=()
+  if [[ -n $CTID ]]; then
+    integer 'container ID' "$CTID" 100 999999999
+    pct status "$CTID" | grep -q 'status: running' || fail "CT $CTID is not running. Start it, then retry."
+    if ! $explicit_directory; then
+      DIRECTORY=$(site_directory_in_guest "$CTID") || fail "No installed alarm site was detected in CT $CTID."
+    fi
+    validate_directory
+    return
+  fi
+
+  mapfile -t matches < <(discover_existing_sites)
+  if $explicit_directory; then
+    local -a filtered=()
+    for row in "${matches[@]}"; do
+      IFS=$'\t' read -r selected label DIRECTORY <<< "$row"
+      [[ $DIRECTORY == "$requested_directory" ]] && filtered+=("$row")
+    done
+    matches=("${filtered[@]}")
+  fi
+  ((${#matches[@]} > 0)) || fail 'No running alarm installation was detected. Start its LXC; installs made in a custom directory must be registered with the Proxmox helper or selected with --ctid and --directory.'
+  if ((${#matches[@]} == 1)); then
+    row=${matches[0]}
+  else
+    printf 'Detected alarm installations:\n' >&2
+    for row in "${matches[@]}"; do
+      IFS=$'\t' read -r selected label DIRECTORY <<< "$row"
+      printf '  CT %s (%s) — %s\n' "$selected" "$label" "$DIRECTORY" >&2
+      menu_args+=("$selected" "$label — $DIRECTORY")
+      labels+=("$selected ($label, $DIRECTORY)")
+    done
+    if command -v whiptail >/dev/null 2>&1; then
+      selected=$(whiptail --title 'Alarm Management System' --menu 'Choose the installation to maintain' 18 88 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || exit 0
+    else
+      PS3='Select the installation to maintain: '
+      select label in "${labels[@]}"; do
+        [[ -n $label ]] || continue
+        selected=${label%% (*}
+        break
+      done
+    fi
+    for row in "${matches[@]}"; do
+      IFS=$'\t' read -r SITE_CANDIDATE LABEL_CANDIDATE DIRECTORY <<< "$row"
+      if [[ $SITE_CANDIDATE == "$selected" ]]; then
+        CTID=$SITE_CANDIDATE
+        break
+      fi
+    done
+    [[ -n $CTID ]] || fail 'No installation was selected.'
+    validate_directory
+    return
+  fi
+  IFS=$'\t' read -r CTID label DIRECTORY <<< "$row"
+  integer 'container ID' "$CTID" 100 999999999
+  validate_directory
+  note "Detected alarm installation in CT $CTID ($label) at $DIRECTORY"
+}
+
 create_container() {
   local hostname cores memory disk storage templates bridge vlan address gateway dns template net
   CTID=$(ask 'New container ID' "$(pvesh get /cluster/nextid)")
@@ -245,6 +334,14 @@ create_container() {
   $ready || fail "Network readiness timed out. Fix CT $CTID networking, then copy this helper into it and run --guest --install --directory $DIRECTORY; see docs/PROXMOX.md."
   ACTION=install
   push_guest
+  local addresses
+  addresses=$(pct exec "$CTID" --keep-env 0 -- ip -4 -o addr show dev eth0 scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}') || addresses=''
+  if [[ -n $addresses ]]; then
+    note "LXC IPv4 address: $(tr '\n' ' ' <<< "$addresses" | sed 's/[[:space:]]*$//')"
+    printf 'For Android pairing, download the public server setup file from the web app Mobile pairing page and import it in the Android app. The IP alone does not specify the configured HTTP/HTTPS scheme or port.\n'
+  else
+    note "The LXC is installed, but its IPv4 address could not be read. Check it with: pct exec $CTID -- ip -4 addr show dev eth0"
+  fi
   note "CT $CTID ready. In its console use update for application releases; configure backups in Proxmox separately."
 }
 
@@ -265,6 +362,10 @@ main() {
   done
   [[ $(id -u) == 0 ]] || fail 'Run as root.'
   if $GUEST; then
+    # pct exec may start a root shell without HOME. Docker's registry login
+    # stores credentials under HOME/.docker, and install.sh needs that same
+    # path when mounting the credential file into its disposable wizard.
+    export HOME=${HOME:-/root}
     if ! $explicit_directory && [[ -f /etc/alarm-proxmox-site ]]; then IFS= read -r DIRECTORY < /etc/alarm-proxmox-site; fi
     validate_directory
     case $ACTION in install) guest_install;; update|status) guest_maintenance;; *) fail 'Choose install, update or status inside the LXC.';; esac
@@ -278,11 +379,7 @@ main() {
   case $ACTION in
     create) create_container;;
     update|status)
-      pct list
-      [[ -n $CTID ]] || CTID=$(ask 'Existing alarm container ID' '')
-      integer 'container ID' "$CTID" 100 999999999
-      if ! $explicit_directory; then DIRECTORY=$(ask 'Existing site directory' "$DIRECTORY"); validate_directory; fi
-      pct status "$CTID" | grep -q 'status: running' || fail 'Start the selected container first; its settings were not changed.'
+      resolve_existing_site
       push_guest;;
     quit|'') note 'Cancelled';;
     *) fail 'Choose create, update, status or quit.';;
