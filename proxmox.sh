@@ -60,6 +60,45 @@ guest_maintenance() {
   exec sh "$DIRECTORY/install.sh" --directory "$DIRECTORY" "--$ACTION"
 }
 
+portainer_password_hash() {
+  local password confirmation hash
+  read -r -s -p 'Portainer admin password (at least 12 characters): ' password || return 130
+  printf '\n' >&2
+  read -r -s -p 'Confirm Portainer admin password: ' confirmation || return 130
+  printf '\n' >&2
+  [[ ${#password} -ge 12 && $password == "$confirmation" ]] || fail 'Passwords must match and contain at least 12 characters.'
+  # Plaintext travels through stdin, never argv, environment, logs or a disk file.
+  hash=$(printf '%s\n' "$password" | htpasswd -BinC 12 admin) || fail 'Could not hash the Portainer administrator password.'
+  unset password confirmation
+  printf '%s' "${hash#*:}"
+}
+
+offer_portainer() {
+  local images choice port portainer hash
+  images=$(docker ps --format '{{.Image}}') || fail 'Could not inspect existing Docker containers.'
+  if grep -Eq '(^|/)portainer/portainer-(ce|ee)(:|@|$)' <<< "$images"; then
+    note 'An existing Portainer server is running; leaving its configuration and administrator unchanged.'
+    return
+  fi
+  choice=$(ask 'Install and set up optional Portainer? (yes/no)' no)
+  case ${choice,,} in no|n|'') note 'Skipping Portainer; the alarm system uses Docker Compose directly.'; return;; yes|y) ;; *) fail 'Choose yes or no for optional Portainer.';; esac
+  ! docker container inspect alarm-portainer >/dev/null 2>&1 || fail 'alarm-portainer already exists; review it or skip optional Portainer.'
+  ! docker volume inspect alarm_portainer_data >/dev/null 2>&1 || fail 'Existing Portainer data found; review it or skip optional Portainer to preserve its administrator.'
+  port=$(ask 'Portainer HTTPS port' 9443); integer 'Portainer HTTPS port' "$port" 1 65535
+  apt-get install -y apache2-utils
+  hash=$(portainer_password_hash) || fail 'Portainer password setup did not complete.'
+  docker pull portainer/portainer-ce:lts
+  portainer=$(docker image inspect portainer/portainer-ce:lts --format '{{index .RepoDigests 0}}')
+  [[ $portainer =~ ^portainer/portainer-ce@sha256:[a-f0-9]{64}$ ]] || fail 'Could not pin the Portainer image.'
+  docker volume create alarm_portainer_data >/dev/null
+  docker run -d --name alarm-portainer --restart unless-stopped -p "$port:9443" \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=volume,source=alarm_portainer_data,target=/data "$portainer" \
+    --admin-password "$hash" --host unix:///var/run/docker.sock
+  unset hash
+  note "Portainer is configured for local Docker. Open HTTPS on this LXC at port $port and sign in as admin."
+}
+
 install_guest_commands() {
   local target path
   if [[ -e /etc/alarm-proxmox-site || -L /etc/alarm-proxmox-site ]]; then
@@ -127,19 +166,7 @@ EOF
   install_guest_commands
   note 'Private registry access: sign in with an account allowed to pull the alarm images'
   docker login
-  # The normal Linux installer requires a running Portainer. Pin its resolved image.
-  if ! docker ps --format '{{.Image}}' | grep -Eq '(^|/)portainer/portainer-(ce|ee)(:|@|$)'; then
-    ! docker container inspect alarm-portainer >/dev/null 2>&1 || fail 'alarm-portainer exists but is stopped; review it before resuming.'
-    docker pull portainer/portainer-ce:lts
-    local portainer
-    portainer=$(docker image inspect portainer/portainer-ce:lts --format '{{index .RepoDigests 0}}')
-    [[ $portainer =~ ^portainer/portainer-ce@sha256:[a-f0-9]{64}$ ]] || fail 'Could not pin the Portainer image.'
-    docker volume create alarm_portainer_data >/dev/null
-    docker run -d --name alarm-portainer --restart unless-stopped -p 9443:9443 \
-      --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-      --mount type=volume,source=alarm_portainer_data,target=/data "$portainer"
-    note 'Portainer HTTPS is on this LXC at port 9443; initialize its administrator account promptly.'
-  fi
+  offer_portainer
   local installer
   installer=$(mktemp /tmp/alarm-installer.XXXXXX)
   trap 'rm -f -- "${installer:-}"' EXIT
@@ -193,8 +220,7 @@ create_container() {
   dns=$(ask 'DNS server (inherit host DNS when blank)' '')
   [[ -z $dns || $dns =~ ^[a-fA-F0-9:.]+$ ]] || fail 'Use a DNS server IP address.'
   note "Create CT $CTID: $hostname, $cores cores, $memory MiB, $disk GiB on $storage; $bridge, VLAN $vlan, $address"
-  printf 'This creates an unprivileged Debian 13 LXC with nesting/keyctl, Docker, and Portainer HTTPS on port 9443.\n'
-  [[ $(ask 'Type CREATE to proceed' '') == CREATE ]] || { note 'Cancelled; no container created'; return; }
+  printf 'This creates an unprivileged Debian 13 LXC with nesting/keyctl and Docker; Portainer setup is optional.\n'
   pveam update
   template=$(pveam available --section system | awk '$2 ~ /^debian-13-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n 1)
   [[ -n $template ]] || fail 'No Debian 13 amd64 template is available.'

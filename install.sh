@@ -40,7 +40,7 @@ Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 --source retains the developer build path; --ref selects its Git ref.
 
 Native Linux Docker Engine: setup and normal application services run in containers.
-Requires an existing local rootful Docker Engine, Compose v2 and Portainer.
+Requires an existing local rootful Docker Engine and Compose v2. Portainer is optional.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
 Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
 Windows requires setup.ps1 and host discovery. On Linux, use native rootful Docker Engine;
@@ -304,11 +304,6 @@ fi
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet alarm-update-agent.service; then
   fail 'An existing host updater is active. Stop alarm-update-agent.service before using Docker-managed broker operations; no application configuration was changed.'
 fi
-if [ -z "$PORTAINER_URL" ]; then
-  images=$(docker ps --format '{{.Image}}')
-  printf '%s\n' "$images" | grep -Eq '(^|/)portainer/portainer-(ce|ee)(:|@|$)' || fail 'No running Portainer CE/EE server found. Start Portainer or supply --portainer-url.'
-fi
-
 disk_preflight
 case "$DEPLOYMENT_SOURCE" in registry|source) ;; *) fail 'ALARM_DEPLOYMENT_SOURCE must be registry or source.';; esac
 case "$IMAGE_REPOSITORY" in *[!a-z0-9_./-]*|'') fail 'Use a Docker Hub namespace/repository without credentials.';; esac
@@ -435,7 +430,7 @@ set -- "$@" --action "$INSTALL_ACTION"
 if [ -n "$MANIFEST" ]; then set -- "$@" --manifest "$MANIFEST"; fi
 "$@"
 if [ "$CGROUP_HOOK" = true ]; then
-  printf '\nContainers are visible in Portainer. Alpine cgroup boot repair is enabled; application services run in containers.\n'
+  printf '\nServices are managed by Docker Compose. Alpine cgroup boot repair is enabled; application services run in containers.\n'
 else
-  printf '\nContainers are visible in Portainer. No host service was installed.\n'
+  printf '\nServices are managed by Docker Compose. No host service was installed.\n'
 fi
