@@ -7,13 +7,15 @@ fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
 usage() {
   cat <<'EOF'
-Alarm Management System — Proxmox setup and update
+Alarm Management System - Proxmox setup and update
 Run on the Proxmox node as root, with an interactive terminal:
   bash proxmox.sh                         # guided menu
   bash proxmox.sh --create                # create a Debian 13 LXC
   bash proxmox.sh --update                 # detect and update the existing site
   bash proxmox.sh --status                 # detect and show maintenance status
+  bash proxmox.sh --tailscale              # enable Tailscale Serve for its app pages
 Optional overrides: --ctid 120 --directory /opt/alarms
+Create can optionally enable private Tailscale Serve access to the app pages; sign-in is manual.
 Inside a provisioned LXC: update, or alarm-setup to resume initial setup.
 Creation asks about CT ID, resources, storage, bridge, VLAN and IPv4/DNS.
 Existing sites use their own install.sh and its typed update approval.
@@ -33,11 +35,12 @@ ask() {
 
 menu() {
   if command -v whiptail >/dev/null 2>&1; then
-    whiptail --title 'Alarm Management System' --menu 'Choose an operation' 16 76 4 \
+    whiptail --title 'Alarm Management System' --menu 'Choose an operation' 18 76 5 \
       create 'Create a new Debian LXC and install' update 'Update an existing alarm site' \
-      status 'Read existing maintenance status' quit 'Exit' 3>&1 1>&2 2>&3 || exit 0
+      status 'Read existing maintenance status' tailscale 'Enable Tailscale Serve for app pages' \
+      quit 'Exit' 3>&1 1>&2 2>&3 || exit 0
   else
-    ask 'Operation: create, update, status, quit' quit
+    ask 'Operation: create, update, status, tailscale, quit' quit
   fi
 }
 
@@ -45,8 +48,24 @@ validate_directory() {
   [[ $DIRECTORY =~ ^/[a-zA-Z0-9_-]+(/[a-zA-Z0-9_.-]+)*$ && $DIRECTORY != */../* && $DIRECTORY != */.. && $DIRECTORY != */./* && $DIRECTORY != */. ]] || fail 'Use an absolute site directory without spaces or parent traversal.'
 }
 
-integer() { [[ $2 =~ ^[0-9]+$ ]] && (( 10#$2 >= $3 && 10#$2 <= $4 )) || fail "Invalid $1: $2"; }
+integer() { [[ $2 =~ ^[0-9]+$ && ${#2} -le ${#4} ]] && (( 10#$2 >= $3 && 10#$2 <= $4 )) || fail "Invalid $1: $2"; }
 bridge_exists() { [[ -d /sys/class/net/$1/bridge ]]; }
+ipv4_address() {
+  local address=$1 octet
+  [[ $address =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<< "$address"
+  for octet in "${octets[@]}"; do (( 10#$octet <= 255 )) || return 1; done
+}
+ipv4_cidr() {
+  local address prefix
+  [[ $1 == */* ]] || return 1
+  address=${1%/*}; prefix=${1#*/}
+  ipv4_address "$address" && [[ $prefix =~ ^[0-9]{1,2}$ ]] && (( 10#$prefix <= 32 ))
+}
+ensure_tun_device() {
+  if [[ ! -c /dev/net/tun ]] && command -v modprobe >/dev/null 2>&1; then modprobe tun || true; fi
+  [[ -c /dev/net/tun ]] || fail 'Tailscale requires the Proxmox host /dev/net/tun device. Load the tun kernel module, then retry.'
+}
 
 fetch() {
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
@@ -130,6 +149,104 @@ EOF
   chmod 0755 /usr/local/bin/update /usr/local/bin/alarm-setup
 }
 
+install_tailscale_guest() {
+  [[ -c /dev/net/tun ]] || fail 'Tailscale needs /dev/net/tun inside this LXC. Check Proxmox device passthrough and restart the container.'
+  if ! command -v curl >/dev/null 2>&1; then
+    command -v apt-get >/dev/null 2>&1 || fail 'curl is required to install Tailscale in this LXC.'
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl
+  fi
+  if ! command -v tailscale >/dev/null 2>&1; then
+    local tailscale_installer
+    tailscale_installer=$(mktemp /tmp/tailscale-install.XXXXXX)
+    fetch https://tailscale.com/install.sh "$tailscale_installer"
+    sh -n "$tailscale_installer"
+    sh "$tailscale_installer"
+    rm -f -- "$tailscale_installer"
+  fi
+  systemctl enable --now tailscaled
+  local tailscale_ip
+  tailscale_ip=$(tailscale ip -4 2>/dev/null || true)
+  if [[ -z $tailscale_ip ]]; then
+    note 'Authorize this LXC in your Tailscale account using the sign-in URL below'
+    tailscale up
+    printf 'Complete the Tailscale sign-in in your browser, then return here and press Enter. '
+    read -r _ || fail 'Could not read Tailscale sign-in confirmation.'
+    tailscale_ip=$(tailscale ip -4 2>/dev/null || true)
+    [[ -n $tailscale_ip ]] || fail 'Tailscale is not authenticated yet. Complete the sign-in, then retry this option.'
+  else
+    note 'Tailscale is already connected; keeping its existing authentication and settings.'
+  fi
+  if [[ -n $tailscale_ip ]]; then
+    TAILSCALE_IP=$tailscale_ip
+    note "Tailscale IPv4: $tailscale_ip"
+  fi
+}
+
+enable_tailscale_app_access() {
+  local current updated tmp backup port serve_status serve_url serve_host trusted_host
+  [[ -f $DIRECTORY/.env && -f $DIRECTORY/docker-compose.yml ]] || fail "No installed site at $DIRECTORY."
+  docker compose up --help 2>&1 | grep -q -- '--wait' || fail 'Docker Compose v2.1 or newer is required to verify app health after changing Tailscale settings.'
+  [[ -n ${TAILSCALE_IP:-} ]] || TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
+  [[ -n ${TAILSCALE_IP:-} ]] || fail 'Tailscale is installed but not authenticated. Run tailscale up in the LXC and complete its sign-in first.'
+  port=$(awk -F= '$1 == "APP_PORT" { value = $2; sub(/\r$/, "", value) } END { print value }' "$DIRECTORY/.env")
+  port=${port:-8080}
+  integer 'APP_PORT' "$port" 1 65535
+  serve_status=$(tailscale serve status 2>&1 || true)
+  if [[ $serve_status == *"proxy http://127.0.0.1:$port"* ]]; then
+    note 'Tailscale Serve already proxies this app port; keeping its existing configuration.'
+  elif [[ -z $serve_status || $serve_status == *'No serve config'* ]]; then
+    note 'Enabling tailnet-only HTTPS with Tailscale Serve'
+    tailscale serve --bg "http://127.0.0.1:$port" || fail 'Tailscale Serve could not be configured.'
+    serve_status=$(tailscale serve status 2>&1 || true)
+    [[ $serve_status == *"proxy http://127.0.0.1:$port"* ]] || fail 'Tailscale Serve did not report the expected app proxy; inspect `tailscale serve status` before retrying.'
+  else
+    fail 'A different Tailscale Serve configuration already exists in this LXC. It was left unchanged; review `tailscale serve status` before adding the app.'
+  fi
+  serve_url=$(grep -Eo 'https://[^[:space:]]+' <<< "$serve_status" | head -n 1 || true)
+  [[ -n $serve_url ]] || fail 'Tailscale Serve is active, but its HTTPS URL could not be read from `tailscale serve status`.'
+  serve_host=${serve_url#https://}
+  serve_host=${serve_host%%/*}
+  serve_host=${serve_host%%:*}
+  [[ $serve_host =~ ^[a-zA-Z0-9.-]+$ ]] || fail 'Tailscale returned an unexpected Serve hostname; no app settings were changed.'
+  current=$(awk -F= '$1 == "TRUSTED_HOSTS" { sub(/\r$/, "", $2); if ($2 != "") { if (value != "") value = value "," $2; else value = $2 } } END { print value }' "$DIRECTORY/.env")
+  updated=$current
+  for trusted_host in "$serve_host" "$TAILSCALE_IP"; do
+    case ",$updated," in *",$trusted_host,"*) ;;
+      *) updated=${updated:+$updated,}$trusted_host;;
+    esac
+  done
+  if [[ $updated == "$current" ]]; then
+    note "App pages are reachable at $serve_url"
+    return
+  fi
+  backup="/var/backups/alarm-proxmox/$(date +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$backup"
+  cp -p -- "$DIRECTORY/.env" "$backup/.env"
+  tmp=$(mktemp "$DIRECTORY/.env.tailscale.XXXXXX")
+  TRUSTED_HOSTS_VALUE="$updated" awk 'BEGIN {done=0} /^TRUSTED_HOSTS=/ {if (!done) print "TRUSTED_HOSTS=" ENVIRON["TRUSTED_HOSTS_VALUE"]; done=1; next} {print} END {if (!done) print "TRUSTED_HOSTS=" ENVIRON["TRUSTED_HOSTS_VALUE"]}' "$DIRECTORY/.env" > "$tmp"
+  chmod --reference="$DIRECTORY/.env" "$tmp"
+  mv -- "$tmp" "$DIRECTORY/.env"
+  command -v curl >/dev/null 2>&1 || fail 'curl is needed to verify the app host configuration.'
+  if ! (cd "$DIRECTORY" && docker compose up -d --no-build --wait --wait-timeout 180 app gateway); then
+    cp -p -- "$backup/.env" "$DIRECTORY/.env"
+    (cd "$DIRECTORY" && docker compose up -d --no-build --wait --wait-timeout 180 app gateway) || true
+    fail 'The app did not become healthy with Tailscale settings. The previous .env was restored; inspect docker compose logs before retrying.'
+  fi
+  host_ok=false
+  for trusted_host in "$serve_host" "$TAILSCALE_IP"; do
+    response=$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' \
+      --header "Host: $trusted_host" "http://127.0.0.1:$port/" 2>/dev/null || true)
+    case "$response" in 2??|3??) host_ok=true; break;; esac
+  done
+  if ! $host_ok; then
+    cp -p -- "$backup/.env" "$DIRECTORY/.env"
+    (cd "$DIRECTORY" && docker compose up -d --no-build --wait --wait-timeout 180 app gateway) || true
+    fail 'The app rejected the Tailscale host check. The previous .env was restored; inspect app logs before retrying.'
+  fi
+  note "App pages are reachable at $serve_url"
+}
+
 guest_install() {
   # Bootstrap is deliberately separate from existing-site maintenance.
   [[ ! -e $DIRECTORY/.env && ! -e $DIRECTORY/docker-compose.yml ]] || fail 'An existing site is present. Use update; setup never reconfigures it.'
@@ -168,22 +285,30 @@ EOF
   docker login
   offer_portainer
   local installer
-  installer=$(mktemp /tmp/alarm-installer.XXXXXX)
+  installer=''
   trap 'rm -f -- "${installer:-}"' EXIT
+  if [[ ${ENABLE_TAILSCALE:-false} == true ]]; then
+    note 'Installing Tailscale in the LXC'
+    install_tailscale_guest
+  fi
+  installer=$(mktemp /tmp/alarm-installer.XXXXXX)
   fetch https://raw.githubusercontent.com/technochris1/alarm-management-installer/main/install.sh "$installer"
   sh -n "$installer"
   # The existing installer preserves HTTP/HTTPS, exact ports and private image digests.
   sh "$installer" --directory "$DIRECTORY" --install
   rm -f -- "$installer"
   trap - EXIT
+  if [[ ${ENABLE_TAILSCALE:-false} == true ]]; then enable_tailscale_app_access; fi
   note 'Setup completed. Use update in this LXC for reviewed release updates.'
 }
 
 push_guest() {
   # pct exec uses lxc-attach; stdin remains available for login/wizard/APPLY.
   local remote=/run/alarm-proxmox-launcher.sh
+  local -a guest_args=(--guest "--$ACTION" --directory "$DIRECTORY")
+  if [[ ${ENABLE_TAILSCALE:-false} == true ]]; then guest_args+=(--enable-tailscale); fi
   pct push "$CTID" "${BASH_SOURCE[0]}" "$remote" --perms 0700
-  pct exec "$CTID" --keep-env 0 -- bash "$remote" --guest "--$ACTION" --directory "$DIRECTORY"
+  pct exec "$CTID" --keep-env 0 -- bash "$remote" "${guest_args[@]}"
 }
 
 site_directory_in_guest() {
@@ -275,8 +400,36 @@ resolve_existing_site() {
   note "Detected alarm installation in CT $CTID ($label) at $DIRECTORY"
 }
 
+install_tailscale_existing() {
+  local config slot choice attempt ready=false
+  ensure_tun_device
+  config=$(pct config "$CTID")
+  if ! grep -Eq '^dev[0-9]+:.*(/dev/net/tun|path=/dev/net/tun)' <<< "$config"; then
+    choice=$(ask 'Tailscale needs /dev/net/tun. Adding it requires stopping and restarting this LXC, briefly interrupting the app. Continue? (yes/no)' no)
+    case ${choice,,} in yes|y) ;; no|n|'') note 'Tailscale setup cancelled; the container was not changed.'; return;; *) fail 'Choose yes or no.';; esac
+    slot=''
+    for attempt in {0..9}; do
+      if ! grep -q "^dev$attempt:" <<< "$config"; then slot=$attempt; break; fi
+    done
+    [[ -n $slot ]] || fail 'No free Proxmox device passthrough slot is available.'
+    pct set "$CTID" "--dev$slot" /dev/net/tun
+    pct shutdown "$CTID" --timeout 60 || fail "Could not gracefully stop CT $CTID. TUN passthrough is configured; start the container and retry Tailscale setup."
+    pct start "$CTID"
+    for (( attempt=0; attempt<30; attempt++ )); do
+      if pct status "$CTID" 2>/dev/null | grep -q 'status: running' && pct exec "$CTID" --keep-env 0 -- test -c /dev/net/tun >/dev/null 2>&1; then ready=true; break; fi
+      sleep 2
+    done
+    $ready || fail "CT $CTID restarted but /dev/net/tun is not ready. Review its device settings before retrying."
+  else
+    note 'TUN device passthrough is already configured.'
+  fi
+  ACTION=tailscale
+  ENABLE_TAILSCALE=false
+  push_guest
+}
+
 create_container() {
-  local hostname cores memory disk storage templates bridge vlan address gateway dns template net
+  local hostname cores memory disk storage templates bridge vlan address gateway dns template net tailscale_choice
   CTID=$(ask 'New container ID' "$(pvesh get /cluster/nextid)")
   integer 'container ID' "$CTID" 100 999999999
   # Cluster-wide VM/CT IDs share a namespace. Never reuse an existing ID.
@@ -300,16 +453,25 @@ create_container() {
   [[ $bridge =~ ^[a-zA-Z0-9_.-]+$ ]] && bridge_exists "$bridge" || fail 'Choose an existing Linux bridge.'
   vlan=$(ask 'VLAN tag (0 for none)' 0); integer VLAN "$vlan" 0 4094
   address=$(ask 'IPv4: dhcp or address/prefix' dhcp)
-  [[ $address == dhcp || $address =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]] || fail 'Invalid IPv4/CIDR; Proxmox also validates the network.'
+  [[ $address == dhcp ]] || ipv4_cidr "$address" || fail 'Enter dhcp or a valid IPv4 address/prefix.'
   gateway=''
   if [[ $address != dhcp ]]; then
     gateway=$(ask 'IPv4 gateway' '')
-    [[ $gateway =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail 'A static address needs an IPv4 gateway.'
+    ipv4_address "$gateway" || fail 'A static address needs a valid IPv4 gateway.'
   fi
   dns=$(ask 'DNS server (inherit host DNS when blank)' '')
   [[ -z $dns || $dns =~ ^[a-fA-F0-9:.]+$ ]] || fail 'Use a DNS server IP address.'
+  tailscale_choice=$(ask 'Enable optional Tailscale Serve for private HTTPS access to alarm pages? (yes/no)' no)
+  case ${tailscale_choice,,} in
+    no|n|'') ENABLE_TAILSCALE=false;;
+    yes|y)
+      ensure_tun_device
+      ENABLE_TAILSCALE=true;;
+    *) fail 'Choose yes or no for optional Tailscale.';;
+  esac
   note "Create CT $CTID: $hostname, $cores cores, $memory MiB, $disk GiB on $storage; $bridge, VLAN $vlan, $address"
-  printf 'This creates an unprivileged Debian 13 LXC with nesting/keyctl and Docker; Portainer setup is optional.\n'
+  $ENABLE_TAILSCALE && note 'Tailscale will be installed in the unprivileged LXC with /dev/net/tun device passthrough.'
+  printf 'This creates an unprivileged Debian 13 LXC with nesting/keyctl and Docker; Portainer and Tailscale Serve are optional.\n'
   pveam update
   template=$(pveam available --section system | awk '$2 ~ /^debian-13-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n 1)
   [[ -n $template ]] || fail 'No Debian 13 amd64 template is available.'
@@ -323,6 +485,7 @@ create_container() {
     --description 'Alarm Management System; app maintenance uses install.sh with typed host approval.')
   [[ -z $dns ]] || args+=(--nameserver "$dns")
   pct create "${args[@]}"
+  if $ENABLE_TAILSCALE; then pct set "$CTID" --dev0 /dev/net/tun; fi
   note "CT $CTID created. If a later step fails it is retained; do not recreate it or delete its volumes."
   pct start "$CTID"
   local attempt
@@ -346,16 +509,17 @@ create_container() {
 }
 
 main() {
-  ACTION=''; CTID=''; GUEST=false; DIRECTORY=/opt/alarm-management-system
+  ACTION=''; CTID=''; GUEST=false; DIRECTORY=/opt/alarm-management-system; ENABLE_TAILSCALE=false; TAILSCALE_IP=''
   local explicit_directory=false
   while (( $# )); do
     case $1 in
-      --create|--update|--status|--install)
+      --create|--update|--status|--tailscale|--install)
         [[ -z $ACTION ]] || fail 'Select one action.'; ACTION=${1#--}; shift;;
       --ctid|--directory)
         (( $# >= 2 )) || fail "Missing value for $1"
         if [[ $1 == --ctid ]]; then CTID=$2; else DIRECTORY=$2; explicit_directory=true; fi; shift 2;;
       --guest) GUEST=true; shift;;
+      --enable-tailscale) ENABLE_TAILSCALE=true; shift;;
       --help|-h) usage; return;;
       *) fail "Unknown argument: $1";;
     esac
@@ -366,9 +530,15 @@ main() {
     # stores credentials under HOME/.docker, and install.sh needs that same
     # path when mounting the credential file into its disposable wizard.
     export HOME=${HOME:-/root}
+    if $ENABLE_TAILSCALE && [[ $ACTION != install ]]; then fail '--enable-tailscale is supported only during initial LXC setup.'; fi
     if ! $explicit_directory && [[ -f /etc/alarm-proxmox-site ]]; then IFS= read -r DIRECTORY < /etc/alarm-proxmox-site; fi
     validate_directory
-    case $ACTION in install) guest_install;; update|status) guest_maintenance;; *) fail 'Choose install, update or status inside the LXC.';; esac
+    case $ACTION in
+      install) guest_install;;
+      update|status) guest_maintenance;;
+      tailscale) install_tailscale_guest; enable_tailscale_app_access;;
+      *) fail 'Choose install, update, status or tailscale inside the LXC.';;
+    esac
     return
   fi
   for command in pct pvesh pvesm pveam; do command -v "$command" >/dev/null || fail 'Run on a Proxmox VE node.'; done
@@ -378,9 +548,9 @@ main() {
   [[ -n $ACTION ]] || ACTION=$(menu)
   case $ACTION in
     create) create_container;;
-    update|status)
+    update|status|tailscale)
       resolve_existing_site
-      push_guest;;
+      if [[ $ACTION == tailscale ]]; then install_tailscale_existing; else push_guest; fi;;
     quit|'') note 'Cancelled';;
     *) fail 'Choose create, update, status or quit.';;
   esac

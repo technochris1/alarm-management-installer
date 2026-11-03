@@ -40,7 +40,7 @@ Image defaults: ALARM_IMAGE_REPOSITORY, ALARM_IMAGE_TAG (latest).
 --source retains the developer build path; --ref selects its Git ref.
 
 Native Linux Docker Engine: setup and normal application services run in containers.
-Requires an existing local rootful Docker Engine and Compose v2. Portainer is optional.
+Requires an existing local rootful Docker Engine and Compose v2.1 or newer. Portainer is optional.
 No host Python, Git, OpenSSL, packages or systemd service are installed.
 Alpine/OpenRC LXC delegation failures receive a small cgroup boot hook before Docker.
 Windows requires setup.ps1 and host discovery. On Linux, use native rootful Docker Engine;
