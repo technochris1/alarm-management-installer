@@ -18,7 +18,7 @@ Optional overrides: --ctid 120 --directory /opt/alarms
 Create can optionally enable private Tailscale Serve access to the app pages; sign-in is manual.
 Inside a provisioned LXC: update, or alarm-setup to resume initial setup.
 Creation asks about CT ID, resources, storage, bridge, VLAN and IPv4/DNS.
-Existing sites use their own install.sh and its typed update approval.
+Existing sites use their own install.sh and its operator approval prompt.
 EOF
 }
 
@@ -303,7 +303,7 @@ EOF
 }
 
 push_guest() {
-  # pct exec uses lxc-attach; stdin remains available for login/wizard/APPLY.
+  # pct exec uses lxc-attach; stdin remains available for login, setup, and maintenance approval.
   local remote=/run/alarm-proxmox-launcher.sh
   local -a guest_args=(--guest "--$ACTION" --directory "$DIRECTORY")
   if [[ ${ENABLE_TAILSCALE:-false} == true ]]; then guest_args+=(--enable-tailscale); fi
@@ -482,7 +482,7 @@ create_container() {
   local -a args=("$CTID" "$templates:vztmpl/$template" --hostname "$hostname" --cores "$cores"
     --memory "$memory" --swap 512 --rootfs "$storage:$disk" --unprivileged 1
     --features 'nesting=1,keyctl=1' --onboot 1 --net0 "$net" --ostype debian
-    --description 'Alarm Management System; app maintenance uses install.sh with typed host approval.')
+    --description 'Alarm Management System; app maintenance uses install.sh with host approval.')
   [[ -z $dns ]] || args+=(--nameserver "$dns")
   pct create "${args[@]}"
   if $ENABLE_TAILSCALE; then pct set "$CTID" --dev0 /dev/net/tun; fi

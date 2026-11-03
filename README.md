@@ -19,7 +19,7 @@ Registry login and site settings remain interactive. Portainer is optional:
 choose whether to install it, its HTTPS port and its initial admin password.
 Later run `update` inside the
 LXC or choose Update in the helper with the existing CT ID and site directory.
-Updates use the installed `install.sh`, with preparation and typed `APPLY`.
+Updates use the installed `install.sh`, with preparation and Y/N approval.
 Failures retain the CT/disks; never recreate over existing data. Existing unrelated
 `update` commands are refused rather than replaced.
 
@@ -39,7 +39,7 @@ Setup runs in a disposable container. The app and internal operations worker run
 Rerunning the installer detects existing alarm sites and offers a host-approved
 Site Maintenance update, configuration repair, or cancellation. Multiple sites
 require `--directory /existing/site`. Use `--update --manifest HTTPS-URL` to prepare
-an update directly; applying still requires typed `APPLY` approval on the host.
+an update directly; applying requires Y/N approval on the host.
 The web application shows read-only maintenance status and cannot initiate updates.
 The installer/maintenance require administrative Docker access. Registry pull credentials are retained in
 the private deployment secret directory for maintenance.
