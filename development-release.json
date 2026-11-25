@@ -1,12 +1,12 @@
 {
   "version": "0.4.159",
   "image": "technochris1/opensourcealarmmanagementsystem",
-  "image_digest": "sha256:79b05ff0406056648fac7f6cf41a20a681ae5ded8e09d5252b9fb867f264cbb7",
-  "tools_image_digest": "sha256:3e16efd99adcb28df56fe2145d3756acccbf538ad6a86e0804223a8215e05b63",
+  "image_digest": "sha256:1bbe0bea9910f69d4ce4e7ccaeec3b8eb93ed86df905b3ab5f8f7460e55371d8",
+  "tools_image_digest": "sha256:d2eeece7810208e903fe42b71f0815f7da2f1e27ee7d7b91a8bbf0611500a7cd",
   "channel": "development",
   "schema_revision": "0028_mobile_client_settings",
   "release_notes": "Application release 0.4.159.",
-  "published_at": "2026-11-25T04:53:13.956462+00:00",
+  "published_at": "2026-11-25T06:29:37.986188+00:00",
   "manifest_url": "https://raw.githubusercontent.com/technochris1/alarm-management-installer/main/development-release.json",
-  "source_commit": "41c1adb39c24e9c13cf1782def574779e8af26d3"
+  "source_commit": "8a33e02275af305fc475f7d6d0ce3c1e6c50e08c"
 }
